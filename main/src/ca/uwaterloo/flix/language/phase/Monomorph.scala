@@ -20,6 +20,8 @@ import ca.uwaterloo.flix.api.Flix
 import ca.uwaterloo.flix.language.CompilationError
 import ca.uwaterloo.flix.language.ast.TypedAst._
 import ca.uwaterloo.flix.language.ast.{BinaryOperator, Symbol, Type, TypeConstructor, TypedAst, UnaryOperator}
+import ca.uwaterloo.flix.language.phase.Unification.UnificationError
+import ca.uwaterloo.flix.util.{InternalCompilerException, Result, Validation}
 import ca.uwaterloo.flix.util.Validation._
 import ca.uwaterloo.flix.util.{InternalCompilerException, Result, Validation}
 
@@ -661,7 +663,7 @@ object Monomorph extends Phase[TypedAst.Root, TypedAst.Root] {
 
       // Unify the declared and actual type to obtain the substitution map.
       val declaredType = defn.tpe
-      val subst = StrictSubstitution(Unification.unifyTypes(declaredType, tpe).get)
+      val subst = StrictSubstitution(Unification.unifyTypes(declaredType, tpe))
 
       // Check whether the function definition has already been specialized.
       def2def.get((sym, tpe)) match {

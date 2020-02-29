@@ -185,7 +185,7 @@ object Unification {
   /**
     * A common super-type for unification errors.
     */
-  sealed trait UnificationError
+  sealed trait UnificationError extends RuntimeException
 
   object UnificationError {
 
@@ -258,24 +258,22 @@ object Unification {
   /**
     * Returns the most general unifier of the two given types `tpe1` and `tpe2`.
     */
-  def unifyTypes(tpe1: Type, tpe2: Type)(implicit flix: Flix): Result[Substitution, UnificationError] = {
+  def unifyTypes(tpe1: Type, tpe2: Type)(implicit flix: Flix): Substitution = {
 
     // NB: Uses a closure to capture the source location `loc`.
 
     /**
       * Unifies the given variable `x` with the given type `tpe`.
-      *
-      * Performs the so-called occurs-check to ensure that the substitution is kind-preserving.
       */
-    def unifyVar(x: Type.Var, tpe: Type): Result[Substitution, UnificationError] = {
+    def unifyVar(x: Type.Var, tpe: Type): Substitution = {
       // The type variable and type are in fact the same.
       if (x == tpe) {
-        return Result.Ok(Substitution.empty)
+        return Substitution.empty
       }
 
       // The type variable occurs inside the type.
       if (tpe.typeVars contains x) {
-        return Result.Err(UnificationError.OccursCheck(x, tpe))
+        throw UnificationError.OccursCheck(x, tpe)
       }
 
       // TODO: Kinds disabled for now. Requires changed to the previous phase to associated type variables with their kinds.
@@ -287,87 +285,75 @@ object Unification {
       if (x.getText.nonEmpty && tpe.isInstanceOf[Type.Var]) {
         tpe.asInstanceOf[Type.Var].setText(x.getText.get)
       }
-      Result.Ok(Substitution.singleton(x, tpe))
+      Substitution.singleton(x, tpe)
     }
 
     /**
       * Unifies the two given types `tpe1` and `tpe2`.
       */
-    def unifyTypes(tpe1: Type, tpe2: Type): Result[Substitution, UnificationError] = (tpe1, tpe2) match {
+    def unifyTypes(tpe1: Type, tpe2: Type): Substitution = (tpe1, tpe2) match {
       case (x: Type.Var, _) => unifyVar(x, tpe2)
 
       case (_, x: Type.Var) => unifyVar(x, tpe1)
 
       case (Type.Cst(TypeConstructor.Native(clazz1)), Type.Cst(TypeConstructor.Native(clazz2))) =>
         if (clazz1 == clazz2)
-          Result.Ok(Substitution.empty)
+          Substitution.empty
         else
-          Result.Err(UnificationError.MismatchedTypes(tpe1, tpe2))
+          throw UnificationError.MismatchedTypes(tpe1, tpe2)
 
       case (Type.Cst(c1), Type.Cst(c2)) =>
         if (c1 == c2)
-          Result.Ok(Substitution.empty)
+          Substitution.empty
         else
-          Result.Err(UnificationError.MismatchedTypes(tpe1, tpe2))
+          throw UnificationError.MismatchedTypes(tpe1, tpe2)
 
       case (Type.Arrow(l1, eff1), Type.Arrow(l2, eff2)) if l1 == l2 => unifyEffects(eff1, eff2)
 
-      case (Type.RecordEmpty, Type.RecordEmpty) => Result.Ok(Substitution.empty)
+      case (Type.RecordEmpty, Type.RecordEmpty) => Substitution.empty
 
-      case (Type.SchemaEmpty, Type.SchemaEmpty) => Result.Ok(Substitution.empty)
+      case (Type.SchemaEmpty, Type.SchemaEmpty) => Substitution.empty
 
       case (Type.RecordExtend(label1, fieldType1, restRow1), row2) =>
         // Attempt to write the row to match.
-        rewriteRow(row2, label1, fieldType1, row2) flatMap {
-          case (subst1, restRow2) =>
-            // TODO: Missing the safety/occurs check.
-            unifyTypes(subst1(restRow1), subst1(restRow2)) flatMap {
-              case subst2 => Result.Ok(subst2 @@ subst1)
-            }
-        }
+        val (subst1, restRow2) = rewriteRow(row2, label1, fieldType1, row2)
+        // TODO: Missing the safety/occurs check.
+        val subst2 = unifyTypes(subst1(restRow1), subst1(restRow2))
+        subst2 @@ subst1
 
       case (Type.SchemaExtend(sym, tpe, restRow1), row2) =>
         // Attempt to write the row to match.
-        rewriteSchemaRow(row2, sym, tpe, row2) flatMap {
-          case (subst1, restRow2) =>
-            // TODO: Missing the safety/occurs check.
-            unifyTypes(subst1(restRow1), subst1(restRow2)) flatMap {
-              case subst2 => Result.Ok(subst2 @@ subst1)
-            }
-        }
+        val (subst1, restRow2) = rewriteSchemaRow(row2, sym, tpe, row2)
+        // TODO: Missing the safety/occurs check.
+        val subst2 = unifyTypes(subst1(restRow1), subst1(restRow2))
+        subst2 @@ subst1
 
-      case (Type.Zero, Type.Zero) => Result.Ok(Substitution.empty) // 0 == 0
-      case (Type.Succ(0, Type.Zero), Type.Zero) => Result.Ok(Substitution.empty)
-      case (Type.Zero, Type.Succ(0, Type.Zero)) => Result.Ok(Substitution.empty)
+      case (Type.Zero, Type.Zero) => Substitution.empty // 0 == 0
+      case (Type.Succ(0, Type.Zero), Type.Zero) => Substitution.empty
+      case (Type.Zero, Type.Succ(0, Type.Zero)) => Substitution.empty
       case (Type.Succ(n1, t1), Type.Succ(n2, t2)) if n1 == n2 => unifyTypes(t1, t2) //(42, t1) == (42, t2)
       case (Type.Succ(n1, t1), Type.Succ(n2, t2)) if n1 > n2 => unifyTypes(Type.Succ(n1 - n2, t1), t2) // (42, x) == (21 y) --> (42-21, x) = y
       case (Type.Succ(n1, t1), Type.Succ(n2, t2)) if n1 < n2 => unifyTypes(Type.Succ(n2 - n1, t2), t1) // (21, x) == (42, y) --> (42-21, y) = x
 
       case (Type.Apply(t11, t12), Type.Apply(t21, t22)) =>
-        unifyTypes(t11, t21) match {
-          case Result.Ok(subst1) => unifyTypes(subst1(t12), subst1(t22)) match {
-            case Result.Ok(subst2) => Result.Ok(subst2 @@ subst1)
-            case Result.Err(e) => Result.Err(e)
-          }
-          case Result.Err(e) => Result.Err(e)
-        }
-      case _ => Result.Err(UnificationError.MismatchedTypes(tpe1, tpe2))
+        val subst1 = unifyTypes(t11, t21)
+        val subst2 = unifyTypes(subst1(t12), subst1(t22))
+        subst2 @@ subst1
+
+      case _ => throw UnificationError.MismatchedTypes(tpe1, tpe2)
     }
 
     /**
       * Unifies the two given lists of types `ts1` and `ts2`.
       */
-    def unifyAll(ts1: List[Type], ts2: List[Type]): Result[Substitution, UnificationError] = {
-      def visit(x: List[Type], y: List[Type]): Result[Substitution, UnificationError] = (x, y) match {
-        case (Nil, Nil) => Result.Ok(Substitution.empty)
-        case (t1 :: rs1, t2 :: rs2) => unifyTypes(t1, t2) match {
-          case Result.Ok(subst1) => visit(subst1(rs1), subst1(rs2)) match {
-            case Result.Ok(subst2) => Result.Ok(subst2 @@ subst1)
-            case Result.Err(e) => Result.Err(e)
-          }
-          case Result.Err(e) => Result.Err(e)
-        }
-        case _ => Result.Err(UnificationError.MismatchedArity(ts1, ts2))
+    def unifyAll(ts1: List[Type], ts2: List[Type]): Substitution = {
+      def visit(x: List[Type], y: List[Type]): Substitution = (x, y) match {
+        case (Nil, Nil) => Substitution.empty
+        case (t1 :: rs1, t2 :: rs2) =>
+          val subst1 = unifyTypes(t1, t2)
+          val subst2 = visit(subst1(rs1), subst1(rs2))
+          subst2 @@ subst1
+        case _ => throw UnificationError.MismatchedArity(ts1, ts2)
       }
 
       visit(ts1, ts2)
@@ -376,19 +362,17 @@ object Unification {
     /**
       * Attempts to rewrite the given row type `row2` into a row that has the given label `label1` in front.
       */
-    def rewriteRow(row2: Type, label1: String, fieldType1: Type, originalType: Type): Result[(Substitution, Type), UnificationError] = row2 match {
+    def rewriteRow(row2: Type, label1: String, fieldType1: Type, originalType: Type): (Substitution, Type) = row2 match {
       case Type.RecordExtend(label2, fieldType2, restRow2) =>
         // Case 1: The row is of the form %{ label2: fieldType2 | restRow2 }
         if (label1 == label2) {
           // Case 1.1: The labels match, their types must match.
-          for {
-            subst <- unifyTypes(fieldType1, fieldType2)
-          } yield (subst, restRow2)
+          val subst = unifyTypes(fieldType1, fieldType2)
+          (subst, restRow2)
         } else {
           // Case 1.2: The labels do not match, attempt to match with a label further down.
-          rewriteRow(restRow2, label1, fieldType1, originalType) map {
-            case (subst, rewrittenRow) => (subst, Type.RecordExtend(label2, fieldType2, rewrittenRow))
-          }
+          val (subst, rewrittenRow) = rewriteRow(restRow2, label1, fieldType1, originalType)
+          (subst, Type.RecordExtend(label2, fieldType2, rewrittenRow))
         }
       case tvar: Type.Var =>
         // Case 2: The row is a type variable.
@@ -396,34 +380,32 @@ object Unification {
         val restRow2 = Type.freshTypeVar()
         val type2 = Type.RecordExtend(label1, fieldType1, restRow2)
         val subst = Unification.Substitution.singleton(tvar, type2)
-        Ok((subst, restRow2))
+        (subst, restRow2)
 
       case Type.RecordEmpty =>
         // Case 3: The `label` does not exist in the record.
-        Err(UnificationError.UndefinedLabel(label1, fieldType1, originalType))
+        throw UnificationError.UndefinedLabel(label1, fieldType1, originalType)
 
       case _ =>
         // Case 4: The type is not a row.
-        Err(UnificationError.NonRecordType(row2))
+        throw UnificationError.NonRecordType(row2)
     }
 
     /**
       * Attempts to rewrite the given row type `row2` into a row that has the given label `label1` in front.
       */
     // TODO: This is a copy of the above function. It would be nice if it could be the same function, but the shape of labels is different.
-    def rewriteSchemaRow(row2: Type, label1: Symbol.PredSym, fieldType1: Type, originalType: Type): Result[(Substitution, Type), UnificationError] = row2 match {
+    def rewriteSchemaRow(row2: Type, label1: Symbol.PredSym, fieldType1: Type, originalType: Type): (Substitution, Type) = row2 match {
       case Type.SchemaExtend(label2, fieldType2, restRow2) =>
         // Case 1: The row is of the form %{ label2: fieldType2 | restRow2 }
         if (label1 == label2) {
           // Case 1.1: The labels match, their types must match.
-          for {
-            subst <- unifyTypes(fieldType1, fieldType2)
-          } yield (subst, restRow2)
+          val subst = unifyTypes(fieldType1, fieldType2)
+          (subst, restRow2)
         } else {
           // Case 1.2: The labels do not match, attempt to match with a label further down.
-          rewriteSchemaRow(restRow2, label1, fieldType1, originalType) map {
-            case (subst, rewrittenRow) => (subst, Type.SchemaExtend(label2, fieldType2, rewrittenRow))
-          }
+          val (subst, rewrittenRow) = rewriteSchemaRow(restRow2, label1, fieldType1, originalType)
+          (subst, Type.SchemaExtend(label2, fieldType2, rewrittenRow))
         }
       case tvar: Type.Var =>
         // Case 2: The row is a type variable.
@@ -431,15 +413,15 @@ object Unification {
         val restRow2 = Type.freshTypeVar()
         val type2 = Type.SchemaExtend(label1, fieldType1, restRow2)
         val subst = Unification.Substitution.singleton(tvar, type2)
-        Ok((subst, restRow2))
+        (subst, restRow2)
 
       case Type.SchemaEmpty =>
         // Case 3: The `label` does not exist in the record.
-        Err(UnificationError.UndefinedPredicate(label1, fieldType1, originalType))
+        throw UnificationError.UndefinedPredicate(label1, fieldType1, originalType)
 
       case _ =>
         // Case 4: The type is not a row.
-        Err(UnificationError.NonSchemaType(row2))
+        throw UnificationError.NonSchemaType(row2)
     }
 
     unifyTypes(tpe1, tpe2)
@@ -448,7 +430,7 @@ object Unification {
   /**
     * Returns the most general unifier of the two given effects `eff1` and `eff2`.
     */
-  def unifyEffects(eff1: Type, eff2: Type)(implicit flix: Flix): Result[Substitution, UnificationError] = {
+  def unifyEffects(eff1: Type, eff2: Type)(implicit flix: Flix): Substitution = {
 
     /**
       * To unify two effects p and q it suffices to unify t = (p ∧ ¬q) ∨ (¬p ∧ q) and check t = 0.
@@ -460,7 +442,7 @@ object Unification {
       */
     def successiveVariableElimination(eff: Type, fvs: List[Type.Var]): (Substitution, Type) = fvs match {
       case Nil => (Substitution.empty, eff)
-        // TODO: Check that eff is false is here. Then return Some(subst) otherwise None.
+      // TODO: Check that eff is false is here. Then return Some(subst) otherwise None.
       case x :: xs =>
         val t0 = Substitution.singleton(x, False)(eff)
         val t1 = Substitution.singleton(x, True)(eff)
@@ -471,7 +453,7 @@ object Unification {
 
     // Determine if effect checking is enabled.
     if (flix.options.xnoeffects)
-      return Ok(Substitution.empty)
+      return Substitution.empty
 
     // The boolean expression we want to show is 0.
     val query = eq(eff1, eff2)
@@ -494,9 +476,9 @@ object Unification {
 
     // Determine if unification was successful.
     if (result != Type.Pure)
-      Ok(subst)
+      subst
     else
-      Err(UnificationError.MismatchedEffects(eff1, eff2))
+      throw UnificationError.MismatchedEffects(eff1, eff2)
   }
 
   /**
@@ -522,33 +504,33 @@ object Unification {
     InferMonad((s: Substitution) => {
       val type1 = s(tpe1)
       val type2 = s(tpe2)
-      unifyTypes(type1, type2) match {
-        case Result.Ok(s1) =>
-          val subst = s1 @@ s
-          Ok(subst, subst(tpe1))
-
-        case Result.Err(UnificationError.MismatchedTypes(baseType1, baseType2)) =>
+      try {
+        val s1 = unifyTypes(type1, type2)
+        val subst = s1 @@ s
+        Ok(subst, subst(tpe1))
+      } catch {
+        case UnificationError.MismatchedTypes(baseType1, baseType2) =>
           Err(TypeError.MismatchedTypes(baseType1, baseType2, type1, type2, loc))
 
-        case Result.Err(UnificationError.MismatchedEffects(baseType1, baseType2)) =>
+        case UnificationError.MismatchedEffects(baseType1, baseType2) =>
           Err(TypeError.MismatchedEffects(baseType1, baseType2, loc))
 
-        case Result.Err(UnificationError.MismatchedArity(baseType1, baseType2)) =>
+        case UnificationError.MismatchedArity(baseType1, baseType2) =>
           Err(TypeError.MismatchedArity(tpe1, tpe2, loc))
 
-        case Result.Err(UnificationError.OccursCheck(baseType1, baseType2)) =>
+        case UnificationError.OccursCheck(baseType1, baseType2) =>
           Err(TypeError.OccursCheckError(baseType1, baseType2, type1, type2, loc))
 
-        case Result.Err(UnificationError.UndefinedLabel(fieldName, fieldType, recordType)) =>
+        case UnificationError.UndefinedLabel(fieldName, fieldType, recordType) =>
           Err(TypeError.UndefinedField(fieldName, fieldType, recordType, loc))
 
-        case Result.Err(UnificationError.NonRecordType(tpe)) =>
+        case UnificationError.NonRecordType(tpe) =>
           Err(TypeError.NonRecordType(tpe, loc))
 
-        case Result.Err(UnificationError.UndefinedPredicate(predSym, predType, schemaType)) =>
+        case UnificationError.UndefinedPredicate(predSym, predType, schemaType) =>
           Err(TypeError.UndefinedPredicate(predSym, predType, schemaType, loc))
 
-        case Result.Err(UnificationError.NonSchemaType(tpe)) =>
+        case UnificationError.NonSchemaType(tpe) =>
           Err(TypeError.NonSchemaType(tpe, loc))
       }
     }
@@ -607,17 +589,14 @@ object Unification {
     InferMonad((s: Substitution) => {
       val effect1 = s(eff1)
       val effect2 = s(eff2)
-      unifyEffects(effect1, effect2) match {
-        case Result.Ok(s1) =>
-          val subst = s1 @@ s
-          Ok(subst, subst(eff1))
-
-        case Result.Err(e) => e match {
-          case UnificationError.MismatchedEffects(baseType1, baseType2) =>
-            Err(TypeError.MismatchedEffects(baseType1, baseType2, loc))
-
-          case _ => throw InternalCompilerException(s"Unexpected error: '$e'.")
-        }
+      try {
+        val s1 = unifyEffects(effect1, effect2)
+        val subst = s1 @@ s
+        Ok(subst, subst(eff1))
+      } catch {
+        case UnificationError.MismatchedEffects(baseType1, baseType2) =>
+          Err(TypeError.MismatchedEffects(baseType1, baseType2, loc))
+        case e: UnificationError => throw InternalCompilerException(s"Unexpected error: '$e'.")
       }
     }
     )
