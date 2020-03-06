@@ -795,13 +795,23 @@ object Monomorph extends Phase[TypedAst.Root, TypedAst.Root] {
       for (defn <- defns) {
         val sym = defn.sym
         if (name == sym.name) {
-          if (Unification.unifyTypes(defn.tpe, tpe).isInstanceOf[Result.Ok[_, _]]) {
+          if (tryUnify(defn.tpe, tpe)) {
             matches += sym
           }
         }
       }
 
       if (matches.size != 1) None else Some(matches.head)
+    }
+
+    /**
+      * Returns `true` if the two types `tpe1` and `tpe2` unifies.
+      */
+    def tryUnify(tpe1: Type, tpe2: Type): Boolean = try {
+      Unification.unifyTypes(tpe1, tpe2)
+      true
+    } catch {
+      case ex: UnificationError => false
     }
 
     /*
